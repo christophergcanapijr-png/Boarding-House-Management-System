@@ -24,6 +24,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_tenant'])) {
     }
 }
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['record_payment'])) {
+    $tenant_id = $_POST['tenant_id'];
+    $amount = $_POST['amount'];
+    $date_paid = $_POST['date_paid'];
+    $month_covered = $_POST['month_covered'];
+
+    try {
+        $check = $pdo->prepare("SELECT id FROM payments WHERE tenant_id = ? AND month_covered = ?");
+        $check->execute([$tenant_id, $month_covered]);
+        if ($check->fetch()) {
+            $pdo->prepare("UPDATE payments SET amount = ?, date_paid = ?, status = 'paid' WHERE tenant_id = ? AND month_covered = ?")->execute([$amount, $date_paid, $tenant_id, $month_covered]);
+        } else {
+            $pdo->prepare("INSERT INTO payments (tenant_id, amount, date_paid, month_covered, status) VALUES (?, ?, ?, ?, 'paid')")->execute([$tenant_id, $amount, $date_paid, $month_covered]);
+        }
+        header('Location: index.php?success=paid');
+        exit;
+    } catch(Exception $e) {
+        $error = "Error: " . $e->getMessage();
+    }
+}
+
+if(isset($_GET['success']) && $_GET['success'] === 'paid') $success = "Payment recorded successfully!";
+
 $rooms = $pdo->query("
     SELECT r.*, 
     COUNT(t.id) as tenant_count,
@@ -35,6 +58,17 @@ $rooms = $pdo->query("
 ")->fetchAll(PDO::FETCH_ASSOC);
 
 $all_rooms = $pdo->query("SELECT * FROM rooms ORDER BY room_number")->fetchAll(PDO::FETCH_ASSOC);
+
+$all_tenants = $pdo->query("
+    SELECT t.*, r.room_number, r.room_type, r.price,
+    COALESCE(p.status, 'unpaid') as payment_status,
+    p.date_paid,
+    CASE WHEN COALESCE(p.status, 'unpaid') = 'unpaid' THEN r.price ELSE 0 END as balance
+    FROM tenants t
+    JOIN rooms r ON t.room_id = r.id
+    LEFT JOIN payments p ON p.tenant_id = t.id AND p.month_covered = DATE_FORMAT(NOW(), '%Y-%m')
+    ORDER BY r.room_number
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $total = count($rooms);
 $occupied = count(array_filter($rooms, fn($r) => $r['status'] === 'occupied'));
@@ -75,11 +109,10 @@ $vacant = $total - $occupied;
         .room-icon { position: absolute; top: 1rem; right: 1rem; color: #ccc; }
         .success { background: #dcfce7; color: #16a34a; padding: 12px; border-radius: 8px; margin-bottom: 1rem; font-size: 14px; }
         .error { background: #fee2e2; color: #dc2626; padding: 12px; border-radius: 8px; margin-bottom: 1rem; font-size: 14px; }
-
-        /* Modal */
         .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center; }
         .modal-overlay.active { display: flex; }
         .modal { background: #fff; border-radius: 16px; padding: 2rem; width: 500px; max-width: 90%; max-height: 85vh; overflow-y: auto; }
+        .modal-lg { width: 750px; }
         .modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.5rem; }
         .modal-header h2 { font-size: 18px; font-weight: 600; }
         .close-btn { background: none; border: none; cursor: pointer; font-size: 20px; color: #888; }
@@ -98,11 +131,13 @@ $vacant = $total - $occupied;
         .btn { padding: 10px 20px; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; border: none; }
         .btn-primary { background: #c45e1a; color: white; }
         .btn-outline { background: transparent; border: 1px solid #ccc; color: #1a1a1a; }
-        .btn-danger { background: #fee2e2; color: #dc2626; border: none; padding: 8px 16px; border-radius: 8px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-block; margin-top: 10px; }
+        .btn-danger { background: #fee2e2; color: #dc2626; border: none; padding: 8px 16px; border-radius: 8px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-block; }
         .btn-full { width: 100%; margin-top: 0.5rem; }
-
-        /* Pay modal */
-        .btn-pay { background: #c45e1a; color: white; border: none; padding: 7px 16px; border-radius: 8px; font-size: 13px; cursor: pointer; margin-top: 10px; }
+        .btn-pay { background: #c45e1a; color: white; border: none; padding: 7px 16px; border-radius: 8px; font-size: 13px; cursor: pointer; }
+        table { width: 100%; border-collapse: collapse; }
+        th { background: #f9f9f9; padding: 10px 12px; text-align: left; font-size: 12px; color: #888; font-weight: 500; border-bottom: 1px solid #eee; }
+        td { padding: 12px; font-size: 13px; border-bottom: 1px solid #f5f5f5; }
+        tr:last-child td { border-bottom: none; }
     </style>
 </head>
 <body>
@@ -185,14 +220,15 @@ $vacant = $total - $occupied;
             <div class="form-group">
                 <label>Select Room</label>
                 <select name="room_id" id="room_select" onchange="checkBedspacer(this)" required>
-                   <?php foreach($all_rooms as $room): ?>
-<option value="<?= $room['id'] ?>" 
-    data-type="<?= $room['room_type'] ?>"
-    <?= $room['status'] === 'occupied' && $room['room_type'] !== 'Bedspacer' ? 'disabled' : '' ?>>
-    Room <?= $room['room_number'] ?> — <?= $room['room_type'] ?> (₱<?= number_format($room['price'], 2) ?>)
-    <?= $room['status'] === 'occupied' && $room['room_type'] !== 'Bedspacer' ? '— Occupied' : '' ?>
-</option>
-<?php endforeach; ?>
+                    <option value="">-- Select Room --</option>
+                    <?php foreach($all_rooms as $room): ?>
+                    <option value="<?= $room['id'] ?>"
+                        data-type="<?= $room['room_type'] ?>"
+                        <?= $room['status'] === 'occupied' && $room['room_type'] !== 'Bedspacer' ? 'disabled' : '' ?>>
+                        Room <?= $room['room_number'] ?> — <?= $room['room_type'] ?> (₱<?= number_format($room['price'], 2) ?>)
+                        <?= $room['status'] === 'occupied' && $room['room_type'] !== 'Bedspacer' ? '— Occupied' : '' ?>
+                    </option>
+                    <?php endforeach; ?>
                 </select>
             </div>
             <div class="form-group bed-group" id="bed_group">
@@ -225,6 +261,50 @@ $vacant = $total - $occupied;
     </div>
 </div>
 
+<!-- All Payments Modal -->
+<div class="modal-overlay" id="allPaymentsModal">
+    <div class="modal modal-lg">
+        <div class="modal-header">
+            <h2>💰 <?= date('F Y') ?> Payments</h2>
+            <button class="close-btn" onclick="closeModal('allPaymentsModal')">✕</button>
+        </div>
+        <?php if(count($all_tenants) === 0): ?>
+            <p style="text-align:center;color:#888;padding:2rem;">No tenants yet.</p>
+        <?php else: ?>
+        <table>
+            <thead>
+                <tr>
+                    <th>Room</th>
+                    <th>Tenant</th>
+                    <th>Rent</th>
+                    <th>Status</th>
+                    <th>Date Paid</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php foreach($all_tenants as $t): ?>
+                <tr>
+                    <td>Room <?= $t['room_number'] ?><br><small style="color:#888"><?= $t['room_type'] ?></small></td>
+                    <td><?= $t['name'] ?><br><small style="color:#888"><?= $t['contact'] ?></small></td>
+                    <td>₱<?= number_format($t['price'], 2) ?></td>
+                    <td><span class="badge badge-<?= $t['payment_status'] ?>"><?= ucfirst($t['payment_status']) ?></span></td>
+                    <td><?= $t['date_paid'] ?? '—' ?></td>
+                    <td>
+                        <?php if($t['payment_status'] === 'unpaid'): ?>
+                        <button class="btn-pay" onclick="openPayModal(<?= $t['id'] ?>, '<?= $t['name'] ?>', <?= $t['price'] ?>)">Mark Paid</button>
+                        <?php else: ?>
+                        <span style="color:#16a34a;font-size:13px;">✓ Paid</span>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+        <?php endif; ?>
+    </div>
+</div>
+
 <!-- Pay Modal -->
 <div class="modal-overlay" id="payModal">
     <div class="modal">
@@ -232,7 +312,8 @@ $vacant = $total - $occupied;
             <h2>Record Payment</h2>
             <button class="close-btn" onclick="closeModal('payModal')">✕</button>
         </div>
-        <form method="POST" action="payments.php">
+        <form method="POST">
+            <input type="hidden" name="record_payment" value="1" />
             <input type="hidden" name="tenant_id" id="pay_tenant_id" />
             <div class="form-group">
                 <label>Tenant</label>
@@ -302,6 +383,7 @@ function openPayModal(id, name, amount) {
     document.getElementById('pay_tenant_name').value = name;
     document.getElementById('pay_amount').value = amount;
     closeModal('roomModal');
+    closeModal('allPaymentsModal');
     openModal('payModal');
 }
 
